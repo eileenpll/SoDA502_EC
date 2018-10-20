@@ -1,0 +1,135 @@
+---
+title: "SoDA 502 Emotional Contagion"
+output: html_notebook
+---
+
+1. Emotion Detection
+```{r}
+setwd("/Users/Charlotte/Desktop/Fall 2018/SoDA 502/Emotional Contagion")
+
+#install.packages(c("readr","jsonlite","plyr","dplyr","tidyr","tidytext"))
+library(readr)
+library(jsonlite)
+library(plyr)
+library(dplyr)
+library(tidyr)
+library(tidytext)
+
+## function that converts multiple json to df
+json2df <- function(string) {
+    lst <- head(
+            strsplit(
+                    gsub('\\}}\n','\\}}x!x!', string),'x!x!')[[1]],-1) %>%
+            as.list()
+    # replace the line below to ~ for the ease of testing code
+    # df <- lapply(lst[1:100],fromJSON)
+    df <- lapply(lst[1:100], fromJSON) %>%
+            lapply(., function(x) {
+                    x[sapply(x, is.null)] <- NA; unlist(x)}) %>%
+            lapply(., function(x)
+                    do.call("data.frame", as.list(x))) %>%
+            rbind.fill() %>%
+            tibble::rowid_to_column("ID")
+    return(df)
+    }
+
+# credit to https://gist.github.com/CateGitau/05e6ff80b2a3aaa58236067811cee44e
+# clean tweets
+cleanedText <- function(x) {
+    x<-gsub("http[[:alnum:][:punct:]]*", "", x)  ## Remove URLs
+    x<-gsub('\\b+RT', '', x) ## Remove RT
+    x<-gsub('#\\S+', '', x) ## Remove Hashtags
+    x<-gsub('@\\S+', '', x) ## Remove Mentions
+    x<-gsub('[[:cntrl:]]', '', x) ## Remove Controls and special characters
+    x<-gsub("\\d", '', x) ## Remove Controls and special characters
+    x<-gsub('[[:punct:]]', '', x) ## Remove Punctuations
+    x<-gsub("^[[:space:]]*","",x) ## Remove leading whitespaces
+    x<-gsub("[[:space:]]*$","",x) ## Remove trailing whitespaces
+    x<-gsub(' +',' ',x) ## Remove extra whitespaces
+    return(x)
+    }
+
+EmotionDetection <- function(df) {
+    # tokenize text
+    df.token <- df %>%
+        select(c("ID","text")) %>%
+        mutate(text = as.character(text)) %>%
+        mutate(
+            text = cleanedText(text)
+        ) %>%
+        unnest_tokens(word, text)
+    # sentiment analysis
+    df.sentiment <- df.token %>%
+        inner_join(get_sentiments("nrc"), by = "word") %>%
+        filter(sentiment %in% c("fear","anger","sadness",
+                                "disgust", "negative")) %>%
+        group_by(ID,sentiment) %>%
+        dplyr::summarise(count=n()) %>%
+        # long to wide
+        spread(sentiment,count,fill = 0) %>%
+        .[c("ID","anger","disgust","fear","sadness","negative")] %>%
+        mutate(
+            anger_binary = ifelse(anger>0,1,0),
+            digust_binary = ifelse(disgust>0,1,0),
+            fear_binary = ifelse(fear>0,1,0),
+            sadness_binary = ifelse(sadness>0,1,0),
+            negative_binary = ifelse(negative>0,1,0)
+        )
+    }
+
+fileName <- "tm_tweets_merge.txt"
+string <- read_file(fileName)
+df <- json2df(string)
+df100 <- df[1:100,] # play with a subset
+
+save(df100, file = "df100.RData")
+load("df100.RData")
+
+df100.subset <- df100 %>%
+    dplyr::select(c("ID", "text","retweet_count","favorite_count",
+             "user.followers_count","user.location",
+             "user.description","user.friends_count",
+             "coordinates.coordinates1","coordinates.coordinates2",
+             "created_at","place.full_name","place.name")
+           ) %>%
+    plyr::rename(c("coordinates.coordinates1"="long",
+             "coordinates.coordinates2"="lat",
+             "user.followers_count"="followers",
+             "user.friends_count"="friends")) %>%
+    mutate(lat = as.numeric(levels(lat))[lat],
+           long = as.numeric(levels(long))[long]) 
+
+df100.emotion <- EmotionDetection(df100) %>%
+    left_join(df100.subset,., by = "ID") 
+df100.emotion[is.na(df100.emotion)] <- 0
+str(df100.emotion)
+```
+
+2. Hotspots Identification
+
+```{r}
+#install.packages(c("ggmap","ggplot2","leaflet","lubridate","maps","ggthemes"),quiet=TRUE)
+# animated maps
+# devtools::install_github("dgrtwo/gganimate", quiet = TRUE)
+# note this required imagemagick to be installedlibrary(ggmap)
+library(leaflet)
+library(gganimate)
+library(lubridate)
+library(ggthemes)
+library(maps)
+library(ggplot2)
+
+us_basemap <- ggplot() +
+  borders(database = "state",regions = , colour = "gray85", fill = "gray80")
+us_basemap
+
+us_basemap + 
+    geom_point(data = df100.emotion, aes(x = long, y = lat),
+               colour = 'purple', alpha = .5) +
+    scale_size_continuous(range = c(1, 8),
+                          breaks = c(250, 500, 750, 1000)) +
+    labs(title = "Tweet Locations after the Shooting of Trayvon Martin")
+
+
+```
+
