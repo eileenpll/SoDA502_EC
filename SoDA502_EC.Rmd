@@ -5,7 +5,7 @@ output: html_notebook
 
 1. Emotion Detection
 ```{r}
-setwd("/Users/Charlotte/Desktop/Fall 2018/SoDA 502/Emotional Contagion")
+#setwd("/Users/Charlotte/Desktop/Fall 2018/SoDA 502/Emotional Contagion")
 
 #install.packages(c("readr","jsonlite","plyr","dplyr","tidyr","tidytext"))
 library(readr)
@@ -23,11 +23,12 @@ json2df <- function(string) {
             as.list()
     # replace the line below to ~ for the ease of testing code
     # df <- lapply(lst[1:100],fromJSON)
-    df <- lapply(lst[1:100], fromJSON) %>%
+    df <- lapply(lst, fromJSON) %>%
             lapply(., function(x) {
-                    x[sapply(x, is.null)] <- NA; unlist(x)}) %>%
-            lapply(., function(x)
-                    do.call("data.frame", as.list(x))) %>%
+                x[sapply(x, is.null)] <- NA; unlist(x)}) %>%
+            lapply(., function(x) {
+                do.call("data.frame", as.list(x))}
+                ) %>%
             rbind.fill() %>%
             tibble::rowid_to_column("ID")
     return(df)
@@ -70,7 +71,7 @@ EmotionDetection <- function(df) {
         .[c("ID","anger","disgust","fear","sadness","negative")] %>%
         mutate(
             anger_binary = ifelse(anger>0,1,0),
-            digust_binary = ifelse(disgust>0,1,0),
+            disgust_binary = ifelse(disgust>0,1,0),
             fear_binary = ifelse(fear>0,1,0),
             sadness_binary = ifelse(sadness>0,1,0),
             negative_binary = ifelse(negative>0,1,0)
@@ -80,12 +81,8 @@ EmotionDetection <- function(df) {
 fileName <- "tm_tweets_merge.txt"
 string <- read_file(fileName)
 df <- json2df(string)
-df100 <- df[1:100,] # play with a subset
 
-save(df100, file = "df100.RData")
-load("df100.RData")
-
-df100.subset <- df100 %>%
+df.subset <- df %>%
     dplyr::select(c("ID", "text","retweet_count","favorite_count",
              "user.followers_count","user.location",
              "user.description","user.friends_count",
@@ -97,39 +94,120 @@ df100.subset <- df100 %>%
              "user.followers_count"="followers",
              "user.friends_count"="friends")) %>%
     mutate(lat = as.numeric(levels(lat))[lat],
-           long = as.numeric(levels(long))[long]) 
+           long = as.numeric(levels(long))[long],
+           time = as.POSIXct(
+               created_at, tz = "GMT", format = "%a %b %e %H:%M:%S %z %Y")
+           ) 
+    
+df.emotion <- EmotionDetection(df.subset) %>%
+    left_join(df.subset,., by = "ID") 
+df.emotion[is.na(df.emotion)] <- 0
 
-df100.emotion <- EmotionDetection(df100) %>%
-    left_join(df100.subset,., by = "ID") 
-df100.emotion[is.na(df100.emotion)] <- 0
-str(df100.emotion)
+save(df, df.emotion, file = "df_emotion.RData")
 ```
 
-2. Hotspots Identification
+2. Mapping Emotions
 
 ```{r}
-#install.packages(c("ggmap","ggplot2","leaflet","lubridate","maps","ggthemes"),quiet=TRUE)
-# animated maps
-# devtools::install_github("dgrtwo/gganimate", quiet = TRUE)
-# note this required imagemagick to be installedlibrary(ggmap)
-library(leaflet)
-library(gganimate)
-library(lubridate)
-library(ggthemes)
-library(maps)
-library(ggplot2)
+rm(list = ls())
 
+#install.packages(c("ggmap","ggplot2","lubridate","maps"),quiet=TRUE)
+library(lubridate)
+library(maps)
+#library(ggmap)
+library(ggplot2)
+library(dplyr)
+
+load("df_emotion.RData")
+
+# remove data from Alaska, Hawaii & Puerto Rico
+df.emotion.map <- 
+    df.emotion %>% 
+    filter(long > -130 & lat < 50 & lat > 20)
+
+# create a variable indexing unique emotions
+# e.g., a tweet is categorized into "fear" if it only contains the emotion "fear"
+# ? any better ways to create such variable? the code below seems stupid.
+####
+df.emotion.map$emo_type <- NA
+df.emotion.map[which(
+    df.emotion.map$fear_binary > 0 & 
+        df.emotion.map$sadness_binary == 0 & 
+        df.emotion.map$disgust_binary == 0 & 
+        df.emotion.map$anger_binary == 0),]$emo_type <- "fear"
+df.emotion.map[which(
+    df.emotion.map$fear_binary == 0 & 
+        df.emotion.map$sadness_binary > 0 & 
+        df.emotion.map$disgust_binary == 0 & 
+        df.emotion.map$anger_binary == 0),]$emo_type <- "sadness"
+df.emotion.map[which(
+    df.emotion.map$fear_binary == 0 & 
+        df.emotion.map$sadness_binary == 0 & 
+        df.emotion.map$disgust_binary > 0 & 
+        df.emotion.map$anger_binary == 0),]$emo_type <- "disgust"
+df.emotion.map[which(
+    df.emotion.map$fear_binary == 0 & 
+        df.emotion.map$sadness_binary == 0 & 
+        df.emotion.map$disgust_binary == 0 & 
+        df.emotion.map$anger_binary > 0),]$emo_type <- "anger"
+df.emotion.map[which(
+    df.emotion.map$fear_binary == 0 & 
+        df.emotion.map$sadness_binary == 0 & 
+        df.emotion.map$disgust_binary == 0 & 
+        df.emotion.map$anger_binary == 0),]$emo_type <- "none"
+df.emotion.map[which(
+    df.emotion.map$fear_binary +
+        df.emotion.map$sadness_binary +
+        df.emotion.map$disgust_binary +
+        df.emotion.map$anger_binary > 1),]$emo_type <- "mixed"
+df.emotion.map[which(
+    df.emotion.map$emo_type == "none" & 
+        df.emotion.map$negative_binary > 0),]$emo_type <- "negative"
+####
+
+# create a US basemap 
 us_basemap <- ggplot() +
   borders(database = "state",regions = , colour = "gray85", fill = "gray80")
-us_basemap
 
-us_basemap + 
-    geom_point(data = df100.emotion, aes(x = long, y = lat),
-               colour = 'purple', alpha = .5) +
+# any spatial temporal patterns of all tweets?
+time1 <- as.numeric(df.emotion.map$time)
+map_tweets <- 
+    us_basemap + 
+    geom_point(data = df.emotion.map, aes(
+        x = long, y = lat, colour = time1),alpha = .5, size = 0.1) +
     scale_size_continuous(range = c(1, 8),
                           breaks = c(250, 500, 750, 1000)) +
+    scale_colour_gradient2(low = "#3288bd", mid = "#fee08b", high = "#d53e4f", midpoint = median(time1, rm.na = TRUE)) +
     labs(title = "Tweet Locations after the Shooting of Trayvon Martin")
+ggsave("map_tweets.pdf", width = 10, height = 7)
 
+EmotionMap <- function(df, emotion, col_low = NA, col_high = NA) {
+    df %>% dplyr::filter(emotion > 0)
+    Emotion <- df[,emotion]
+    map <- us_basemap + 
+        geom_point(data = df, aes(
+        x = long, y = lat,colour = Emotion), alpha = .5, size = 0.1) +
+        scale_size_continuous(
+            range = c(1, 8), breaks = c(250, 500, 750, 1000)) +
+        scale_colour_gradient(
+            low = ifelse(is.na(col_low),"#3288bd", col_low), 
+                              high = ifelse(
+                                  is.na(col_high),"#d53e4f", col_high)) +
+        labs(
+            title = "Tweet Locations after the Shooting of Trayvon Martin")
+    return(map)
+    }
+
+EmotionMap(df.emotion.map, "fear")
+
+df.discrete.emo <- df.emotion.map %>% filter(!emo_type %in% c("mixed", "none", "negative"))
+
+mapNegEmo <- us_basemap + 
+        geom_point(data = df.discrete.emo, aes(
+        x = long, y = lat,colour = emo_type), alpha = .5, size = 1) +
+        scale_size_continuous(
+            range = c(1, 8), breaks = c(250, 500, 750, 1000)) +
+        scale_colour_brewer(type = "qual", palette = "Set1")
 
 ```
 
