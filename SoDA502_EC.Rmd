@@ -128,7 +128,7 @@ library(ggplot2)
 library(dplyr)
 library(sp)
 library(maptools)
-
+library(tigris)
 ```
 
 ```{r}
@@ -179,16 +179,16 @@ EmotionMap(df.emotion.map, "fear")
 
 df.discrete.emo <- df.emotion.map %>% filter(!emo_type %in% c("mixed", "none", "negative"))
 
-mapNegEmo <- us_basemap + 
-        geom_point(data = df.discrete.emo, aes(
-        x = long, y = lat,colour = emo_type), alpha = .5, size = 1) +
-        scale_size_continuous(
-            range = c(1, 8), breaks = c(250, 500, 750, 1000)) +
-        scale_colour_brewer(type = "qual", palette = "Set1")
-
+# mapNegEmo <- us_basemap + 
+#     geom_point(data = df.discrete.emo, aes(
+#         x = long, y = lat,colour = emo_type), alpha = .5, size = 1) +
+#     coord_fixed(1.3) +
+#     scale_size_continuous(
+#         range = c(1, 8), breaks = c(250, 500, 750, 1000)) +
+#     scale_colour_brewer(type = "qual", palette = "Set1")
 ```
 
-3. Spatial Autocorrelation
+3. Spatial Analysis
 
 Aggregate data by date and county
 ```{r}
@@ -209,64 +209,79 @@ counties_df <- cbind(df.emotion.con, overlap_set)
 # aggregate tweets by county
 agg_dat <- plyr::count(counties_df, c('GEOID'))
 agg_dat$GEOID <- as.factor(agg_dat$GEOID)
-num_per_county <- as.numeric(agg_dat$freq)
 
 # create the data structure needed to create a plot
 sp_f <- fortify(counties_shp)
 counties_shp$id <- row.names(counties_shp)
 counties_shp@data <- left_join(counties_shp@data, agg_dat, by = (GEOID = "GEOID"))
-sp_f <- left_join(sp_f, counties_shp@data[,c(18,19)])
+sp_f <- left_join(sp_f, counties_shp@data[,c(18,19)]) %>%
+  filter(long > -130 & long < -60 & lat < 50 & lat > 20) 
+sp_f$freq[is.na(sp_f$freq)] <- 0
 
 # plotting
+us <- states() %>% spTransform(CRS("+proj=longlat +datum=WGS84"))
+us <- fortify(us) %>%
+  filter(long > -130 & long < -60 & lat < 50 & lat > 20) 
+
 obs_by_county <- ggplot() +
     geom_polygon(data = sp_f, aes(long, lat, group = group, fill = freq)) +
-    coord_equal() +
+    #coord_equal() +
+    coord_fixed(1.3) +
     labs(fill = "No. of \nTweets")+
     geom_polygon(data=sp_f,aes(long,lat, group = group),
-                 fill = NA, col = "black") +
-    ggtitle("Number of Tweets per County")+
-    scale_fill_gradient(low = "lightblue", high = "navyblue")
+                 colour = "gray85", fill = NA, size = 0.2) +
+    geom_polygon(data = us, aes(long, lat, group = group), colour = "gray45", fill = NA, size = 0.2) +
+    ggtitle("Tweets mapped by county")+
+    #scale_fill_gradient(low = "lightblue", high = "darkblue")
+    #scale_fill_distiller(palette = "Spectral")
+    scale_fill_distiller(palette = "Reds", direction = 1)
 
-# obs_by_county
+pdf(file="tweet_county.pdf", height=4, width=5.2)
+obs_by_county
+dev.off()
 
+# calculate /day:  
+# 1) number of tweets per county
+# 2) number of tweets for a given emotion per county
+# 3) number of emotional words per county
 emo.by_timeNcounty <- counties_df %>%
     group_by(date, GEOID) %>%
     dplyr::summarise(
         n = n(),
-        fear = sum(fear_binary),
-        anger = sum(anger_binary),
-        sadness = sum(sadness_binary),
-        disgust = sum(disgust_binary),
-        negative = sum(negative_binary)
-    ) %>% tibble::rowid_to_column("ID") %>%
-    mutate(fear_percent = fear/n,
-           anger_percent = anger/n,
-           sadness_percent = sadness/n,
-           disgust_percent = disgust/n,
-           negative_percent = negative/n)
+        fear_t = sum(fear_binary),
+        anger_t = sum(anger_binary),
+        sadness_t = sum(sadness_binary),
+        disgust_t = sum(disgust_binary),
+        negative_t = sum(negative_binary),
+        fear_w = sum(fear),
+        anger_w = sum(anger),
+        sadness_w = sum(sadness),
+        disgust_w = sum(disgust),
+        negative_w = sum(negative))
 
 plot(emo.by_timeNcounty$date, emo.by_timeNcounty$n,
      xlab="Date", ylab="Number of Tweets")
 
-
 ggplot(emo.by_timeNcounty, aes(x = date)) + 
-    geom_point(aes(y = fear, colour = "fear")) + 
-    geom_point(aes(y = disgust, colour = "disgust")) +
-    geom_point(aes(y = sadness, colour = "sadness")) +
-    geom_point(aes(y = anger, colour = "anger")) +
+    geom_point(aes(y = fear_t, colour = "fear")) + 
+    geom_point(aes(y = disgust_t, colour = "disgust")) +
+    geom_point(aes(y = sadness_t, colour = "sadness")) +
+    geom_point(aes(y = anger_t, colour = "anger")) +
     ylab("Frequency") + xlab("Time") + labs(fill = "Emotions")
 
 ggplot(emo.by_timeNcounty, aes(x = date)) + 
-    geom_point(aes(y = fear_percent, colour = "fear")) + 
-    geom_point(aes(y = disgust_percent, colour = "disgust")) +
-    geom_point(aes(y = sadness_percent, colour = "sadness")) +
-    geom_point(aes(y = anger_percent, colour = "anger")) +
-    ylab("Rate") + xlab("Time") + labs(fill = "Emotions")
+    geom_point(aes(y = fear_w, colour = "fear")) + 
+    geom_point(aes(y = disgust_w, colour = "disgust")) +
+    geom_point(aes(y = sadness_w, colour = "sadness")) +
+    geom_point(aes(y = anger_w, colour = "anger")) +
+    ylab("Word Count") + xlab("Time") + labs(fill = "Emotions")
 
 ```
 
 Spatial autocorrelation
 ```{r}
+library(spdep, quietly = TRUE)
+
 # filter out tweets posted during and after the trial 
 # aggregate by GEOID (counties)
 emo.by_county <- emo.by_timeNcounty %>% 
@@ -289,5 +304,52 @@ tweet.polygon <- SpatialPolygonsDataFrame(counties_shp, tweet.df, match.ID = "id
 # tm_shape(tweet.polygon) + 
 #     tm_polygons(style="quantile", col = "n") +
 #     tm_legend(outside = TRUE, text.size = .8) 
+
+# Define neighboring polygons (continguity)
+tweet.nb <- poly2nb(tweet.polygon, queen=TRUE)
+#tweet.mtx <- nb2mat(tweet.nb, style='B', zero.policy = TRUE)
+# assign equal weights to each neighboring polygon
+lw <- nb2listw(tweet.nb, style="W", zero.policy=TRUE)
+lw$weights[1] # weights of the first polygonâs neighbors
+
+# test for spatial autocorrelation
+# Moran's I
+moran.test(tweet.polygon$n,lw, zero.policy = TRUE)
+# Monte Carlo simulation test for significance
+MC <- moran.mc(tweet.polygon$n, lw, nsim=999, zero.policy = TRUE)
+MC
+plot(MC, main=NULL)
+
+# Geary's C
+geary.test(tweet.polygon$n,lw, zero.policy = TRUE)
+GC <- geary.mc(tweet.polygon$n, lw, nsim=999, zero.policy = TRUE)
+GC
+plot(GC, main=NULL)
+
+# apply the same functions to different emotions
+moran.test(tweet.polygon$negative, lw, zero.policy = TRUE)
+moran.mc(tweet.polygon$negative, lw, nsim=999, zero.policy = TRUE)
+geary.test(tweet.polygon$negative, lw, zero.policy = TRUE)
+geary.mc(tweet.polygon$negative, lw, nsim=999, zero.policy = TRUE)
+
+moran.test(tweet.polygon$fear, lw, zero.policy = TRUE)
+moran.mc(tweet.polygon$fear, lw, nsim=999, zero.policy = TRUE)
+geary.test(tweet.polygon$fear, lw, zero.policy = TRUE)
+geary.mc(tweet.polygon$fear, lw, nsim=999, zero.policy = TRUE)
+
+moran.test(tweet.polygon$anger, lw, zero.policy = TRUE)
+moran.mc(tweet.polygon$anger, lw, nsim=999, zero.policy = TRUE)
+geary.test(tweet.polygon$anger, lw, zero.policy = TRUE)
+geary.mc(tweet.polygon$anger, lw, nsim=999, zero.policy = TRUE)
+
+moran.test(tweet.polygon$disgust, lw, zero.policy = TRUE)
+moran.mc(tweet.polygon$disgust, lw, nsim=999, zero.policy = TRUE)
+geary.test(tweet.polygon$disgust, lw, zero.policy = TRUE)
+geary.mc(tweet.polygon$disgust, lw, nsim=999, zero.policy = TRUE)
+
+moran.test(tweet.polygon$sadness, lw, zero.policy = TRUE)
+moran.mc(tweet.polygon$sadness, lw, nsim=999, zero.policy = TRUE)
+geary.test(tweet.polygon$sadness, lw, zero.policy = TRUE)
+geary.mc(tweet.polygon$sadness, lw, nsim=999, zero.policy = TRUE)
 
 ```
