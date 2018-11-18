@@ -310,7 +310,7 @@ tweet.nb <- poly2nb(tweet.polygon, queen=TRUE)
 #tweet.mtx <- nb2mat(tweet.nb, style='B', zero.policy = TRUE)
 # assign equal weights to each neighboring polygon
 lw <- nb2listw(tweet.nb, style="W", zero.policy=TRUE)
-lw$weights[1] # weights of the first polygonâs neighbors
+lw$weights[1] # weights of the first polygon's neighbors
 
 # test for spatial autocorrelation
 # Moran's I
