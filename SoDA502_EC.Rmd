@@ -16,6 +16,8 @@ library(plyr)
 library(dplyr)
 library(tidyr)
 library(tidytext)
+library(wordcloud)
+library(RColorBrewer)
 ```
 
 Functions
@@ -113,6 +115,67 @@ df.emotion <- EmotionDetection(df.subset) %>%
 df.emotion[is.na(df.emotion)] <- 0
 
 save(df, df.emotion, file = "df_emotion.RData")
+```
+
+World Cloud
+```{r}
+df.token <- df.subset %>%
+        select(c("ID","text")) %>%
+        mutate(text = as.character(text)) %>%
+        mutate(
+            text = cleanedText(text)
+        ) %>%
+        unnest_tokens(word, text)
+# sentiment analysis
+df.sentiment <- df.token %>%
+    inner_join(get_sentiments("nrc"), by = "word") %>%
+    filter(sentiment %in% c("fear","anger","sadness",
+                            "disgust", "negative"))
+
+negative <- df.sentiment %>% 
+    filter(sentiment == "negative") %>% 
+    group_by(word) %>% 
+    dplyr::summarise(count=n()) %>%
+    mutate(word = as.character(word))
+fear <- df.sentiment %>% 
+    filter(sentiment == "fear") %>% 
+    group_by(word) %>% 
+    dplyr::summarise(count=n()) %>%
+    mutate(word = as.character(word))
+anger <- df.sentiment %>% 
+    filter(sentiment == "anger") %>% 
+    group_by(word) %>% 
+    dplyr::summarise(count=n()) %>%
+    mutate(word = as.character(word))
+sadness <- df.sentiment %>% 
+    filter(sentiment == "sadness") %>% 
+    group_by(word) %>% 
+    dplyr::summarise(count=n()) %>%
+    mutate(word = as.character(word))
+disgust <- df.sentiment %>% 
+    filter(sentiment == "disgust") %>% 
+    group_by(word) %>% 
+    dplyr::summarise(count=n()) %>%
+    mutate(word = as.character(word))
+
+pdf(file = "WordCloud.pdf")
+neg_wc <- wordcloud(words = negative$word, freq = negative$count, min.freq = 1,
+          max.words=200, random.order=FALSE, rot.per=0.35, 
+          colors=brewer.pal(8, "Dark2"))
+fear_wc <- wordcloud(words = fear$word, freq = fear$count, scale=c(4,.5), min.freq = 2,
+          max.words=200, random.order=FALSE, rot.per=0.35, 
+          colors=brewer.pal(8, "Dark2"))
+anger_wc <- wordcloud(words = anger$word, freq = anger$count, scale=c(4,.5), min.freq = 2,
+          max.words=200, random.order=FALSE, rot.per=0.35, 
+          colors=brewer.pal(8, "Dark2"))
+sadness_wc <- wordcloud(words = sadness$word, freq = sadness$count, scale=c(4,.5), min.freq = 2,
+          max.words=200, random.order=FALSE, rot.per=0.35, 
+          colors=brewer.pal(8, "Dark2"))
+disgust_wc <- wordcloud(words = disgust$word, freq = disgust$count, scale=c(4,.5), min.freq = 2,
+          max.words=200, random.order=FALSE, rot.per=0.35, 
+          colors=brewer.pal(8, "Dark2"))
+dev.off()
+
 ```
 
 2. Mapping Emotions
