@@ -1,0 +1,473 @@
+---
+title: "Emotions in geotagged tweets"
+output: pdf
+author: 
+editor_options: 
+  chunk_output_type: console
+---
+R version 3.5.3
+
+1. Emotion Detection
+
+```{r}
+# load packages
+
+# clear workspace
+rm(list = ls())
+
+# set working directory
+#setwd("~")
+
+# install.packages(c("plyr","dplyr","tidyr","tidytext"))
+library(plyr)
+library(dplyr)
+library(tidyr)
+library(tidytext)
+```
+
+Functions
+```{r}
+Tokenizer <- function(df) {
+    # tokenize text
+    df.token <- df %>%
+        dplyr::select(ID, clean_tweet) %>%
+        mutate(text = as.character(clean_tweet)) %>%
+        unnest_tokens(word, text) %>%
+        anti_join(stop_words, by = "word") # remove stopwords
+    }
+
+# sentiment analysis
+SentiExtraction <- function(df.token, dict) {  
+    df.sentiment <- df.token %>%
+        inner_join(dict, by = "word") %>%
+        filter(sentiment %in% c("fear","anger","sadness",
+                                "disgust", "negative")) %>%
+        group_by(ID,sentiment) %>%
+        dplyr::summarise(count=n()) %>%
+        # long to wide
+        spread(sentiment,count,fill = 0) %>%
+        .[c("ID","anger","disgust","fear","sadness","negative")] %>%
+        mutate(
+            anger_binary = ifelse(anger>0,1,0),
+            disgust_binary = ifelse(disgust>0,1,0),
+            fear_binary = ifelse(fear>0,1,0),
+            sadness_binary = ifelse(sadness>0,1,0),
+            negative_binary = ifelse(negative>0,1,0)
+        )
+    }
+```
+
+Read in data
+```{r}
+# read in raw data
+df <- read.csv("raw_tweets.csv")
+
+# read in preprocessed data
+df_cleanedTweets <- read.csv("cleaned_tweets.csv")
+
+# select useful cols from the raw data
+df_subset <- df %>%
+    dplyr::select(c("ID", "id", "text", 
+             "user.followers_count", "user.friends_count",
+             "coordinates.coordinates1","coordinates.coordinates2",
+             "user.verified","created_at")
+           ) %>%
+    plyr::rename(c("coordinates.coordinates1"="long",
+             "coordinates.coordinates2"="lat",
+             "user.followers_count"="followers",
+             "user.friends_count"="friends"
+             ))
+
+# join raw data & cleaned tweets
+df_subset <- left_join(df_subset, df_cleanedTweets, by = "ID")
+
+# remove duplicates
+df_cleaned <- distinct(df_subset, id, text, .keep_all=TRUE) %>%
+    mutate(time = as.POSIXct(created_at, tz = "GMT", format = "%a %b %e %H:%M:%S %z %Y")) %>%
+    mutate(date = as.Date(time))
+
+```
+
+Emotion detection w/ NRC
+```{r}
+# tokenize text
+df_token <- Tokenizer(df_cleaned) 
+
+# NRC-Emotion-Lexicon-v0.92
+nrc <- get_sentiments('nrc')
+df_emotion <- SentiExtraction(df_token, nrc) %>%
+    left_join(df_cleaned,., by = "ID") 
+df_emotion[is.na(df_emotion)] <- 0
+write.csv(df_emotion, file = 'emotions.csv')
+
+```
+
+2. Mapping Emotions
+
+```{r}
+rm(list = ls())
+
+#install.packages(c("ggplot2","lubridate","maps","sp","maptools","spatstat","tigris","rgdal","raster"), quiet=TRUE)
+
+library(lubridate)
+library(maps)
+library(ggplot2)
+library(dplyr)
+library(sp)
+library(maptools) # maptools_0.9-4
+library(spatstat) # spatstat_1.56-1 
+library(tigris)
+library(rgdal)
+library(raster)
+```
+
+```{r}
+df_emotion <- read.csv("emotions.csv")
+
+df_emotion$X <- NULL
+
+# remove data from Alaska, Hawaii & Puerto Rico
+df.emotion.con <- 
+    df_emotion %>% 
+    filter(long > -130 & lat < 50 & lat > 20)
+
+```
+
+fig1
+```{r}
+# create a US basemap 
+us_basemap <- ggplot() +
+  borders(database = "state",regions = , colour = "gray85", fill = "white")
+
+# fig1_color
+map_tweets <- 
+    us_basemap + 
+    geom_point(data = df.emotion.con, aes(
+        x = long, y = lat),alpha = .5, size = 0.1, color = "#d53e4f") + 
+    coord_fixed(1.3) + labs(x = "longitude", y = "latitude")
+ggsave("map_tweets_color.tiff", width = 10, height = 6)
+
+# fig1_greyscale
+map_tweets <- 
+    us_basemap + 
+    geom_point(data = df.emotion.con, aes(
+        x = long, y = lat),alpha = .5, size = 0.1, color = "grey55") + 
+    coord_fixed(1.3) + labs(x = "longitude", y = "latitude")
+ggsave("map_tweets_greyscale.tiff", width = 10, height = 6)
+
+```
+
+3. Spatial autocorrelation
+
+Aggregate data by date and county
+```{r}
+# load the shapefile of US counties
+counties_shp <- tigris::counties(state = NULL, cb = FALSE, resolution = "500k", year = NULL)
+save(counties_shp, file = "counties.RData")
+load("counties.RData")
+counties_shp <- spTransform(counties_shp, CRS("+proj=longlat +datum=WGS84"))
+
+coordinates(df.emotion.con) <- ~long+lat
+proj4string(df.emotion.con) <- CRS("+proj=longlat +datum=WGS84")
+
+#overlay the spatial points onto the spatial polygons
+overlap_set <- sp::over(df.emotion.con, counties_shp)
+df.emotion.con <- as.data.frame(df.emotion.con)
+counties_df <- cbind(df.emotion.con, overlap_set)
+
+# calculate /day:  
+# 1) number of tweets per county
+# 2) number of tweets for a given emotion per county
+emo.DateCounty <- counties_df %>%
+    group_by(date, GEOID) %>%
+    dplyr::summarise(
+        n = n(),
+        fear_t = sum(fear_binary),
+        anger_t = sum(anger_binary),
+        sadness_t = sum(sadness_binary),
+        disgust_t = sum(disgust_binary),
+        negative_t = sum(negative_binary))
+emo.DateCounty$date <- as.Date(emo.DateCounty$date)
+
+emo.Date <- emo.DateCounty %>%
+    group_by(date) %>%
+    dplyr::summarise(
+        n = sum(n),
+        fear_t = sum(fear_t),
+        anger_t = sum(anger_t),
+        sadness_t = sum(sadness_t),
+        disgust_t = sum(disgust_t),
+        negative_t = sum(negative_t))    
+emo.Date$date <- as.Date(emo.Date$date)
+
+# change to long format
+emo.Date_long <- emo.Date %>% 
+    dplyr::select(date:negative_t) %>% 
+    dplyr::rename(Number = n, Negative = negative_t, Fear = fear_t, Anger = anger_t, Disgust = disgust_t, Sadness = sadness_t) %>% 
+    as.data.frame() %>%
+    reshape::melt(id.vars = "date", variable_name = "Emotion")
+
+emo.Date_long$Emotion <- factor(emo.Date_long$Emotion, levels = c("Number","Negative","Fear","Anger","Disgust", "Sadness"))
+emo.Date_long$date <- as.Date(emo.Date_long$date)
+
+```
+
+fig2
+```{r}
+library(grid)    
+
+# fig2_color
+# tiff("peng_fig2_color.tiff", width = 10, height = 6, units = 'in', res = 300)
+# mainplot <-
+#     ggplot(emo.Date_long, aes(x=date, y=value, fill=Emotion)) +
+#     geom_line(aes(color=Emotion)) +
+#     # scale_fill_manual(values = colours) +
+#     ylab("Frequency") + xlab("Time") #+ labs(colour = "Emotion")
+
+# fig2_greyscale
+tiff("peng_fig2_greyscale.tiff", 
+     width = 10, 
+     height = 6, 
+     units = 'in', 
+     res = 300)
+mainplot <-
+    ggplot(emo.Date_long, aes(x=date, y=value, fill=Emotion)) +
+    geom_line(aes(color=Emotion))+
+    geom_point(aes(shape=Emotion, color=Emotion)) +
+    ylab("Frequency") + xlab("Time") +
+    scale_color_grey() +
+    theme_classic()
+
+# need to download google trend for "Trayvon Martin"
+gTrend <- read.csv("Google Trends.csv", skip = 1) %>% 
+    rename(Popularity = trayvon.martin...United.States.) %>% 
+    mutate(Popularity = as.character(Popularity)) %>%
+    mutate(Popularity = ifelse(Popularity == "<1", 0.5, Popularity)) %>%
+    mutate(Popularity = as.numeric(Popularity), Day = as.Date(Day))
+p_gTrend <- ggplot(gTrend, aes(x = Day, y = Popularity, group = 1)) + 
+    geom_line() + xlab("Time")
+
+# make a plot with inset
+# create a theme to remove background
+theme_white <- function() {
+    theme_update(panel.background = element_blank(),
+                 panel.grid.major = element_blank(),
+                 panel.grid.minor = element_blank())
+}
+theme_set(theme_bw())
+theme_white()
+
+vp <- viewport(width = 0.3, height = 0.3, x = 0.72, y = 0.8)
+
+full <- function() {
+    print(mainplot)
+    theme_set(theme_bw(base_size = 8))
+    theme_white()
+    print(p_gTrend, vp = vp)
+    theme_set(theme_bw())
+}
+full()
+dev.off()
+```
+
+Spatial autocorrelation
+```{r}
+library(spdep, quietly = TRUE)
+
+# aggregate by GEOID (counties)
+emo.by_county <- emo.DateCounty %>% 
+    group_by(GEOID) %>%
+    dplyr::summarise(
+        n = sum(n),
+        fear = sum(fear_t),
+        anger = sum(anger_t),
+        sadness = sum(sadness_t),
+        disgust = sum(disgust_t),
+        negative = sum(negative_t))
+
+counties_shp$id <- row.names(counties_shp)
+
+# map tweets onto spatial polygons
+tweet.df <- left_join(counties_shp@data, emo.by_county, by = (GEOID = "GEOID"))
+tweet.df[, 19:24][is.na(tweet.df[, 19:24])] <- 0
+tweet.polygon <- SpatialPolygonsDataFrame(counties_shp, tweet.df, match.ID = "id") 
+tweet.polygon@data$long <- as.numeric(tweet.polygon@data$INTPTLON)
+tweet.polygon@data$lat <- as.numeric(tweet.polygon@data$INTPTLAT)
+tweet.polygon.con <- tweet.polygon[tweet.polygon@data$lat < 50 
+                                   & tweet.polygon@data$lat > 20
+                                   & tweet.polygon@data$long > -130 
+                                   & tweet.polygon@data$long < -60, ]
+
+# Define neighboring polygons (continguity)
+tweet.nb <- poly2nb(tweet.polygon.con, queen=TRUE)
+# assign equal weights to each neighboring polygon
+lw <- nb2listw(tweet.nb, style="W", zero.policy=TRUE)
+
+# test for spatial autocorrelation
+# Moran's I
+# Monte Carlo simulation test for significance
+moran.mc(tweet.polygon.con$n, lw, nsim=999, zero.policy = TRUE)
+moran.mc(tweet.polygon.con$negative, lw, nsim=999, zero.policy = TRUE)
+moran.mc(tweet.polygon.con$fear, lw, nsim=999, zero.policy = TRUE)
+moran.mc(tweet.polygon.con$anger, lw, nsim=999, zero.policy = TRUE)
+moran.mc(tweet.polygon.con$disgust, lw, nsim=999, zero.policy = TRUE)
+moran.mc(tweet.polygon.con$sadness, lw, nsim=999, zero.policy = TRUE)
+
+```
+
+Local statistics (LISA)
+```{r}
+# The local Moran Ii shows where there are high levels of local autocorrelation.
+Ii_n <-  localmoran(tweet.polygon.con$n, lw, zero.policy = TRUE)
+Ii_neg <- localmoran(tweet.polygon.con$negative, lw, zero.policy = TRUE)
+Ii_fear <- localmoran(tweet.polygon.con$fear, lw, zero.policy = TRUE)
+Ii_ang <- localmoran(tweet.polygon.con$anger, lw, zero.policy = TRUE)
+Ii_dis <- localmoran(tweet.polygon.con$disgust, lw, zero.policy = TRUE)
+Ii_sad <- localmoran(tweet.polygon.con$sadness, lw, zero.policy = TRUE)
+
+```
+
+fig4
+```{r}
+library(classInt)
+library(gstat)
+library(grDevices)
+
+P_LocalMoran <- function(sp_df, var, Ii, greyscale=FALSE) {
+    # manually make a moran plot standarize variables
+    sp_df$s_var <- scale(var) 
+    # create a lagged variable
+    sp_df$lag_s_var <- lag.listw(lw, sp_df$s_var)
+    # identify the moran plot quadrant for each observation
+    sp_df$quad_sig <- NA
+    sp_df@data[(sp_df$s_var >= 0 & sp_df$lag_s_var >= 0) & 
+                   (Ii[, 5] <= 0.05), "quad_sig"] <- 1
+    sp_df@data[(sp_df$s_var <= 0 & sp_df$lag_s_var <= 0) & 
+                   (Ii[, 5] <= 0.05), "quad_sig"] <- 2
+    sp_df@data[(sp_df$s_var >= 0 & sp_df$lag_s_var <= 0) & 
+                   (Ii[, 5] <= 0.05), "quad_sig"] <- 3
+    sp_df@data[(sp_df$s_var >= 0 & sp_df$lag_s_var <= 0) & 
+                   (Ii[, 5] <= 0.05), "quad_sig"] <- 4
+    sp_df@data[(sp_df$s_var <= 0 & sp_df$lag_s_var >= 0) & 
+                   (Ii[, 5] <= 0.05), "quad_sig"] <- 5  #non-sig
+    # Set the breaks for the thematic map classes
+    breaks <- seq(1, 5, 1)
+    # Set the corresponding labels for the thematic map classes
+    labels <- c("High-High", "Low-Low", "High-Low", "Low-High", "Nonsig.")
+    # see ?findInterval - This is necessary for making a map
+    np <- findInterval(sp_df$quad_sig, breaks)
+    # Assign colors to each map class
+    # color
+    colors_color <- c("red", "blue", "lightpink", "skyblue2", "white") 
+    # greyscale
+    colors_greyscale <- grey.colors(5)
+    if (greyscale) {
+        colors <- colors_greyscale
+    }
+    else {
+        colors <- colors_color
+    }
+    # mtext("Local Moran's I", cex = 1.5, side = 3, line = 1)
+    # colors[np] manually sets the color for each county
+    plot(tweet.polygon.con, col = colors[np], lwd = 0.1)
+    # legend("bottomright", legend = labels, fill = colors, bty = "n")
+}
+
+# color
+pdf("localmoran_fear.pdf", width = 4, height = 4)
+P_LocalMoran(tweet.polygon.con, tweet.polygon.con$fear, Ii_fear)
+dev.off()
+
+pdf("localmoran_anger.pdf", width = 4, height = 4)
+P_LocalMoran(tweet.polygon.con, tweet.polygon.con$anger, Ii_ang)
+dev.off()
+
+pdf("localmoran_disgust.pdf", width = 4, height = 4)
+P_LocalMoran(tweet.polygon.con, tweet.polygon.con$disgust, Ii_dis)
+dev.off()
+
+pdf("localmoran_sadness.pdf", width = 4, height = 4)
+P_LocalMoran(tweet.polygon.con, tweet.polygon.con$sadness, Ii_sad)
+dev.off()
+
+
+# greyscale
+pdf("localmoran_fear_grey.pdf", width = 4, height = 4)
+P_LocalMoran(tweet.polygon.con, tweet.polygon.con$fear, Ii_fear, greyscale = TRUE)
+dev.off()
+
+pdf("localmoran_anger_grey.pdf", width = 4, height = 4)
+P_LocalMoran(tweet.polygon.con, tweet.polygon.con$anger, Ii_ang, greyscale = TRUE)
+dev.off()
+
+pdf("localmoran_disgust_grey.pdf", width = 4, height = 4)
+P_LocalMoran(tweet.polygon.con, tweet.polygon.con$disgust, Ii_dis, greyscale = TRUE)
+dev.off()
+
+pdf("localmoran_sadness_grey.pdf", width = 4, height = 4)
+P_LocalMoran(tweet.polygon.con, tweet.polygon.con$sadness, Ii_sad, greyscale = TRUE)
+dev.off()
+```
+
+4. Point Pattern Analysis
+
+```{r}
+#### Density-based point process ####
+
+# downloaded from http://www2.census.gov/geo/tiger/GENZ2013/cb_2013_us_state_500k.zip
+us <- readOGR(dsn = "cb_2013_us_state_500k")
+names <- c("American Samoa", "United States Virgin Islands", "Puerto Rico", "Guam", "Commonwealth of the Northern Mariana Islands", "Alaska", "Hawaii")
+us_con <- subset(us, !NAME %in% names)
+
+us.owin <- spatstat::as.owin(us_con)
+
+# read in raster layers for census data
+# Center for International Earth Science Information Network - CIESIN - Columbia University. 2017. U.S. Census Grids (Summary File 1), 2010. Palisades, NY: NASA Socioeconomic Data and Applications Center (SEDAC). https://doi.org/10.7927/H40Z716C.
+# downloaded from https://sedac.ciesin.columbia.edu/data/set/usgrid-summary-file1-2010
+filenames <- list.files("usgrid_data_2010/ascii", pattern="*.asc", full.names=TRUE)
+census <- lapply(filenames, raster)
+for(i in 1:length(census)) {
+    census[[i]]@crs@projargs <- as.character(crs(us))
+}
+
+census_im <- lapply(census, as.im)
+pop_im <- census_im[[6]]
+bl_im <- census_im[[4]]
+wh_im <- census_im[[7]]
+
+# subset df based on presence vs. absence of a given emotion
+df_neg <- df.emotion.con %>% filter(negative > 0)
+df_fear <- df.emotion.con %>% filter(fear > 0)
+df_ang <- df.emotion.con %>% filter(anger > 0)
+df_dis <- df.emotion.con %>% filter(disgust > 0)
+df_sad <- df.emotion.con %>% filter(sadness > 0)
+
+# create a "ppp" object
+emo.ppp <- ppp(df.emotion.con$long, df.emotion.con$lat, window = us.owin)
+neg.ppp <- ppp(df_neg$long, df_neg$lat, window = us.owin)
+fear.ppp <- ppp(df_fear$long, df_fear$lat, window = us.owin)
+ang.ppp <- ppp(df_ang$long, df_ang$lat, window = us.owin)
+dis.ppp <- ppp(df_dis$long, df_dis$lat, window = us.owin)
+sad.ppp <- ppp(df_sad$long, df_sad$lat, window = us.owin)
+
+# Create the Poisson point process model
+# number of tweets
+PPM_n <- ppm(emo.ppp ~ pop_im + bl_im + wh_im)
+
+# negative
+PPM_neg <- ppm(neg.ppp ~ pop_im + bl_im + wh_im)
+
+# fear
+PPM_fear <- ppm(fear.ppp ~ pop_im + bl_im + wh_im)
+
+# anger
+PPM_ang <- ppm(ang.ppp ~ pop_im + bl_im + wh_im)
+
+# disgust
+PPM_dis <- ppm(dis.ppp ~ pop_im + bl_im + wh_im)
+
+# sadness
+PPM_sad <- ppm(sad.ppp ~ pop_im + bl_im + wh_im)
+
+```
+
